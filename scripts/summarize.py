@@ -123,7 +123,7 @@ def normalize_relation(value: str) -> str:
     return " ".join(parts[:2])
 
 
-def normalize_context(raw: dict, existing: dict | None = None) -> dict:
+def normalize_context(raw: dict, existing: Optional[dict] = None) -> dict:
     existing = existing if isinstance(existing, dict) else {}
     raw = raw if isinstance(raw, dict) else {}
     relation = normalize_relation(raw.get("relation") or existing.get("relation") or "")

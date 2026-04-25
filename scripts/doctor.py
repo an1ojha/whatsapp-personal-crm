@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = Path.home() / "Library" / "Group Containers" / "group.net.whatsapp.WhatsApp.shared" / "ChatStorage.sqlite"
@@ -33,7 +34,7 @@ def status(label: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
-def command_ok(command: str, args: list[str] | None = None) -> bool:
+def command_ok(command: str, args: Optional[list[str]] = None) -> bool:
     exe = shutil.which(command)
     if not exe:
         return False
