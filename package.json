@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-personal-crm",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "setup": "bash scripts/setup_mac.sh",
+    "doctor": ".venv/bin/python scripts/doctor.py",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "sync": ".venv/bin/python export.py && .venv/bin/python scripts/seed_watchlist.py && .venv/bin/python scripts/summarize.py && .venv/bin/python scripts/bundle_followups.py && .venv/bin/python scripts/bundle_chats_table.py",
+    "sync:full": ".venv/bin/python export.py --full && .venv/bin/python scripts/seed_watchlist.py && .venv/bin/python scripts/summarize.py --rebuild && .venv/bin/python scripts/bundle_followups.py && .venv/bin/python scripts/bundle_chats_table.py",
+    "sync:followups": ".venv/bin/python scripts/summarize.py --rebuild && .venv/bin/python scripts/bundle_followups.py",
+    "sync:followups:delta": ".venv/bin/python scripts/summarize.py && .venv/bin/python scripts/bundle_followups.py",
+    "export": ".venv/bin/python export.py",
+    "export:full": ".venv/bin/python export.py --full"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.2"
+  }
+}

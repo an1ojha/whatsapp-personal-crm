@@ -1,0 +1,25 @@
+.vercel
+.gstack/
+.DS_Store
+
+# Pipeline / secrets
+.env
+output/
+summaries/
+.venv/
+watchlist.json
+__pycache__/
+*.pyc
+.claude/
+
+# Dependencies / local builds
+node_modules/
+dist/
+
+# Generated dashboard data. Users create this locally with npm run sync.
+public/data/*.json
+!public/data/.gitkeep
+public/linkedin_data/
+
+# Logs
+*.log
