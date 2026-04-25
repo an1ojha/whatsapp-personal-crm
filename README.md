@@ -17,7 +17,7 @@ You do not need WhatsApp Cloud API credentials, a WhatsApp password, or a QR-log
 ## Quick Start
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/an1ojha/whatsapp-personal-crm.git
 cd personal_crm
 npm run setup
 npm run dev
