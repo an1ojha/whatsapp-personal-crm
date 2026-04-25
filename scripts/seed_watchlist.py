@@ -9,20 +9,24 @@ Outputs:
 Compatibility:
   - Migrates watchlist flags from legacy watchlist.json if present.
   - Preserves existing contacts.json fields (on_watchlist/category/context).
+  - On first run, initializes the watchlist from the top 20 recent DM chats.
 """
 
 import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_PATH = ROOT / "output" / "index.json"
+CHATS_DIR = ROOT / "output" / "chats"
 CONTACTS_PATH = ROOT / "output" / "contacts.json"
 GROUPS_PATH = ROOT / "output" / "groups.json"
 WATCHLIST_PATH = ROOT / "watchlist.json"
+INITIAL_WATCHLIST_SIZE = 20
 
 
 def read_json(path: Path, default):
@@ -126,6 +130,42 @@ def is_group_jid(jid: str, typ: str) -> bool:
     return jid.endswith("@g.us")
 
 
+def parse_message_timestamp(value) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw[:19])
+    except ValueError:
+        return None
+
+
+def count_recent_messages(jkey: str, cutoff: datetime) -> int:
+    if not jkey:
+        return 0
+    path = CHATS_DIR / f"{jkey}.jsonl"
+    if not path.exists():
+        return 0
+
+    count = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = parse_message_timestamp(msg.get("timestamp"))
+                if ts and ts >= cutoff:
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build contacts/groups from output/index.json")
     ap.add_argument("--contacts-out", type=Path, default=CONTACTS_PATH, help="Contacts output JSON path.")
@@ -143,7 +183,28 @@ def main() -> None:
 
     legacy_watchlist = load_legacy_watchlist()
     existing_contacts = map_existing_contacts()
+    is_first_run = not existing_contacts and not legacy_watchlist
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    recent_cutoff = datetime.now() - timedelta(days=30)
+    recent_counts = {}
+    initial_watchlist_jids = set()
+
+    if is_first_run:
+        candidates = []
+        for row in index:
+            if not isinstance(row, dict):
+                continue
+            jid = str(row.get("jid") or "").strip()
+            typ = str(row.get("type") or "").strip().lower()
+            jkey = str(row.get("jkey") or "").strip()
+            if not jid or is_group_jid(jid, typ):
+                continue
+            count = count_recent_messages(jkey, recent_cutoff)
+            recent_counts[jid] = count
+            if count > 0:
+                candidates.append((count, str(row.get("last_message") or ""), jid))
+        candidates.sort(reverse=True)
+        initial_watchlist_jids = {jid for _count, _last_message, jid in candidates[:INITIAL_WATCHLIST_SIZE]}
 
     contacts = []
     groups = []
@@ -190,6 +251,11 @@ def main() -> None:
         )
         if category not in {"personal", "family", "startup", "logistics"}:
             category = category_for(name)
+        on_watchlist = (
+            norm_bool(prev.get("on_watchlist"))
+            or norm_bool(legacy.get("on_watchlist"))
+            or (is_first_run and jid in initial_watchlist_jids)
+        )
 
         contacts.append(
             {
@@ -197,7 +263,7 @@ def main() -> None:
                 "jkey": jkey,
                 "name": name,
                 "category": category,
-                "on_watchlist": norm_bool(prev.get("on_watchlist")) or norm_bool(legacy.get("on_watchlist")),
+                "on_watchlist": on_watchlist,
                 "context": normalize_context(prev.get("context"), prev.get("relation")),
                 "context_last_pk": int(prev.get("context_last_pk") or prev.get("relation_last_pk") or 0),
                 "last_message": last_message,
@@ -226,7 +292,12 @@ def main() -> None:
             {
                 "generated_at": generated_at,
                 "contacts": contacts,
-                "_meta": {"count": len(contacts), "source": "index+legacy_watchlist_migration"},
+                "_meta": {
+                    "count": len(contacts),
+                    "source": "index+legacy_watchlist_migration",
+                    "initial_watchlist_source": "top_20_recent_dm_chats" if is_first_run else "preserved",
+                    "initial_watchlist_count": len(initial_watchlist_jids),
+                },
             },
             ensure_ascii=False,
             indent=2,
@@ -243,6 +314,8 @@ def main() -> None:
     )
     print(f"Wrote {len(contacts)} contacts -> {args.contacts_out.relative_to(ROOT)}")
     print(f"Wrote {len(groups)} groups -> {args.groups_out.relative_to(ROOT)}")
+    if is_first_run:
+        print(f"Initialized {len(initial_watchlist_jids)} watchlist contact(s) from recent chat volume.")
 
 
 if __name__ == "__main__":
