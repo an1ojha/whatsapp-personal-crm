@@ -689,7 +689,7 @@ export default defineConfig(({ mode }) => {
             }
           }
 
-          async function runPythonStep(script, args = []) {
+          async function runPythonStep(script, args = [], onChunk = () => {}) {
             return await new Promise((resolve, reject) => {
               const child = spawn('.venv/bin/python', [script, ...args], {
                 cwd: rootDir,
@@ -697,8 +697,16 @@ export default defineConfig(({ mode }) => {
               })
               let stdout = ''
               let stderr = ''
-              child.stdout.on('data', chunk => { stdout += String(chunk) })
-              child.stderr.on('data', chunk => { stderr += String(chunk) })
+              child.stdout.on('data', chunk => {
+                const text = String(chunk)
+                stdout += text
+                onChunk(text)
+              })
+              child.stderr.on('data', chunk => {
+                const text = String(chunk)
+                stderr += text
+                onChunk(text)
+              })
               child.on('error', reject)
               child.on('close', code => {
                 const logs = [stdout, stderr].filter(Boolean).join('\n').trim()
@@ -766,43 +774,113 @@ export default defineConfig(({ mode }) => {
             }
           })
 
-          let isSyncingAll = false
-          server.middlewares.use('/api/sync', async (req, res) => {
+          const syncSteps = [
+            { script: 'export.py', label: 'Exporting WhatsApp chats' },
+            { script: 'scripts/seed_watchlist.py', label: 'Building contacts and groups' },
+            { script: 'scripts/summarize.py', label: 'Generating AI summaries' },
+            { script: 'scripts/bundle_followups.py', label: 'Publishing follow-ups' },
+            { script: 'scripts/bundle_chats_table.py', label: 'Publishing dashboard data' },
+          ]
+          const syncState = {
+            id: null,
+            running: false,
+            status: 'idle',
+            step_index: 0,
+            total_steps: syncSteps.length,
+            current_step: null,
+            started_at: null,
+            finished_at: null,
+            error: null,
+            logs: '',
+          }
+
+          function getSyncStatePayload() {
+            const startedMs = syncState.started_at ? Date.parse(syncState.started_at) : null
+            const finishedMs = syncState.finished_at ? Date.parse(syncState.finished_at) : null
+            const endMs = finishedMs || Date.now()
+            const elapsedSeconds = startedMs ? Math.max(0, Math.round((endMs - startedMs) / 1000)) : 0
+            const completedSteps = syncState.status === 'complete'
+              ? syncState.total_steps
+              : Math.max(0, syncState.step_index)
+            const estimatedRemainingSeconds = syncState.running && completedSteps > 0
+              ? Math.max(0, Math.round((elapsedSeconds / completedSteps) * (syncState.total_steps - completedSteps)))
+              : null
+
+            return {
+              ...syncState,
+              elapsed_seconds: elapsedSeconds,
+              estimated_remaining_seconds: estimatedRemainingSeconds,
+            }
+          }
+
+          function appendSyncLog(text) {
+            syncState.logs = `${syncState.logs}${text}`.slice(-30000)
+          }
+
+          async function runSyncJob({ full }) {
+            syncState.id = `${Date.now()}`
+            syncState.running = true
+            syncState.status = 'running'
+            syncState.step_index = 0
+            syncState.total_steps = syncSteps.length
+            syncState.current_step = syncSteps[0]?.label || null
+            syncState.started_at = new Date().toISOString()
+            syncState.finished_at = null
+            syncState.error = null
+            syncState.logs = ''
+
+            try {
+              for (let i = 0; i < syncSteps.length; i += 1) {
+                const step = syncSteps[i]
+                const args = step.script === 'export.py' && full ? ['--full'] : []
+                syncState.step_index = i
+                syncState.current_step = step.label
+                appendSyncLog(`\n$ ${step.script}${args.length ? ` ${args.join(' ')}` : ''}\n`)
+                const result = await runPythonStep(step.script, args, appendSyncLog)
+                if (result.logs && !syncState.logs.includes(result.logs)) appendSyncLog(`${result.logs}\n`)
+              }
+              syncState.step_index = syncState.total_steps
+              syncState.current_step = 'Done'
+              syncState.status = 'complete'
+            } catch (err) {
+              syncState.status = 'error'
+              syncState.error = err?.message || 'Sync failed'
+              appendSyncLog(`\n${syncState.error}\n`)
+            } finally {
+              syncState.running = false
+              syncState.finished_at = new Date().toISOString()
+            }
+          }
+
+          server.middlewares.use('/api/sync', async (req, res, next) => {
+            if (req.url && req.url !== '/' && req.url !== '') {
+              next()
+              return
+            }
             if (req.method !== 'POST') {
               sendJson(res, 405, { error: 'Method not allowed' })
               return
             }
-            if (isSyncingAll) {
-              sendJson(res, 409, { error: 'Sync already in progress' })
+            if (syncState.running) {
+              sendJson(res, 202, getSyncStatePayload())
               return
             }
 
-            isSyncingAll = true
             try {
               const body = await readRequestJson(req).catch(() => ({}))
-              const exportArgs = body?.full ? ['--full'] : []
-              const steps = [
-                ['export.py', exportArgs],
-                ['scripts/seed_watchlist.py', []],
-                ['scripts/summarize.py', []],
-                ['scripts/bundle_followups.py', []],
-                ['scripts/bundle_chats_table.py', []],
-              ]
-              const results = []
-              for (const [script, args] of steps) {
-                results.push(await runPythonStep(script, args))
-              }
-              sendJson(res, 200, {
-                ok: true,
-                message: 'Sync complete',
-                logs: results.map(r => `$ ${r.script}\n${r.logs}`).join('\n\n').trim(),
-                status: await getSetupStatus(),
-              })
+              runSyncJob({ full: Boolean(body?.full) })
+              sendJson(res, 202, getSyncStatePayload())
             } catch (err) {
               sendJson(res, 500, { error: err?.message || 'Sync failed' })
-            } finally {
-              isSyncingAll = false
             }
+          })
+
+          server.middlewares.use('/api/sync/status', async (req, res) => {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            sendJson(res, 200, getSyncStatePayload())
           })
 
           server.middlewares.use('/api/chat', async (req, res) => {

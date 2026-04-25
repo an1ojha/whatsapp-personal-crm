@@ -338,6 +338,29 @@ img {
   color: var(--accent-success);
 }
 
+.sync-progress {
+  background: #f8fafc;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  font-size: 13px;
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.sync-progress-bar {
+  background: #e5e7eb;
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.sync-progress-fill {
+  background: var(--accent-primary);
+  border-radius: 999px;
+  height: 100%;
+  transition: width 0.25s ease;
+}
+
 .setup-logs {
   background: #0f172a;
   border-radius: 12px;

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
+const MASKED_API_KEY = '••••••••••••••••••••••••'
+
 function StatusRow({ label, ok, detail }) {
   return (
     <div className="setup-status-row">
@@ -12,6 +14,14 @@ function StatusRow({ label, ok, detail }) {
   )
 }
 
+function formatDuration(seconds) {
+  if (seconds == null) return 'estimating...'
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest ? `${minutes}m ${rest}s` : `${minutes}m`
+}
+
 export default function SetupView() {
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -22,6 +32,7 @@ export default function SetupView() {
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [logs, setLogs] = useState('')
+  const [syncProgress, setSyncProgress] = useState(null)
 
   async function loadStatus() {
     setLoading(true)
@@ -32,6 +43,7 @@ export default function SetupView() {
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`)
       setStatus(data)
       setModel(data?.anthropic_model || 'claude-sonnet-4-6')
+      setApiKey(prev => (data?.anthropic_key && !prev ? MASKED_API_KEY : prev))
     } catch (err) {
       setError(err?.message || 'Failed to load setup status')
     } finally {
@@ -60,7 +72,7 @@ export default function SetupView() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`)
-      setApiKey('')
+      setApiKey(MASKED_API_KEY)
       setStatus(data?.status || null)
       setMessage('API key saved locally to .env.')
     } catch (err) {
@@ -75,6 +87,7 @@ export default function SetupView() {
     setError('')
     setMessage('')
     setLogs('')
+    setSyncProgress(null)
     try {
       const r = await fetch('/api/sync', {
         method: 'POST',
@@ -83,8 +96,25 @@ export default function SetupView() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`)
-      setStatus(data?.status || null)
-      setLogs(data?.logs || '')
+
+      let latest = data
+      setSyncProgress(latest)
+      setLogs(latest?.logs || '')
+
+      while (latest?.running) {
+        await new Promise(resolve => setTimeout(resolve, 1500))
+        const statusResp = await fetch('/api/sync/status', { cache: 'no-store' })
+        latest = await statusResp.json()
+        if (!statusResp.ok) throw new Error(latest?.error || `HTTP ${statusResp.status}`)
+        setSyncProgress(latest)
+        setLogs(latest?.logs || '')
+      }
+
+      if (latest?.status === 'error') {
+        throw new Error(latest?.error || 'Sync failed')
+      }
+
+      await loadStatus()
       setMessage('Sync complete. Your local dashboard is ready.')
     } catch (err) {
       setError(err?.message || 'Sync failed')
@@ -126,8 +156,11 @@ export default function SetupView() {
             <input
               className="input-base"
               type="password"
-              placeholder="sk-ant-api03-..."
+              placeholder={status?.anthropic_key ? MASKED_API_KEY : 'sk-ant-api03-...'}
               value={apiKey}
+              onFocus={() => {
+                if (apiKey === MASKED_API_KEY) setApiKey('')
+              }}
               onChange={e => setApiKey(e.target.value)}
             />
             <input
@@ -136,7 +169,7 @@ export default function SetupView() {
               onChange={e => setModel(e.target.value)}
               placeholder="claude-sonnet-4-6"
             />
-            <button type="submit" className="primary-btn" disabled={saving || !apiKey.trim()}>
+            <button type="submit" className="primary-btn" disabled={saving || !apiKey.trim() || apiKey === MASKED_API_KEY}>
               {saving ? 'Saving...' : 'Save key'}
             </button>
           </form>
@@ -164,6 +197,30 @@ export default function SetupView() {
             <p className="muted" style={{ marginTop: 10 }}>
               Last sync: {new Date(status.last_sync_at).toLocaleString()} · {status.chat_count || 0} chats
             </p>
+          )}
+          {syncProgress && (
+            <div className="sync-progress">
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+                <strong>{syncProgress.current_step || 'Preparing sync'}</strong>
+                <span>
+                  Step {Math.min((syncProgress.step_index || 0) + 1, syncProgress.total_steps || 1)} of {syncProgress.total_steps || 1}
+                </span>
+              </div>
+              <div className="sync-progress-bar">
+                <div
+                  className="sync-progress-fill"
+                  style={{
+                    width: `${syncProgress.status === 'complete'
+                      ? 100
+                      : Math.max(8, Math.round(((syncProgress.step_index || 0) / (syncProgress.total_steps || 1)) * 100))}%`,
+                  }}
+                />
+              </div>
+              <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                Elapsed: {formatDuration(syncProgress.elapsed_seconds || 0)}
+                {syncProgress.running && ` · Remaining: ${formatDuration(syncProgress.estimated_remaining_seconds)}`}
+              </p>
+            </div>
           )}
           {logs && <pre className="setup-logs">{logs}</pre>}
         </section>
