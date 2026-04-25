@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Check whether the local Mac setup can run the WhatsApp CRM."""
 
+from __future__ import annotations
+
 import os
 import platform
 import shutil

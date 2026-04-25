@@ -16,6 +16,8 @@ Env:
   ANTHROPIC_MODEL — optional, default claude-sonnet-4-6
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
