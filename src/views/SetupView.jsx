@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const MASKED_API_KEY = '••••••••••••••••••••••••'
 
@@ -15,7 +15,7 @@ function StatusRow({ label, ok, detail }) {
 }
 
 function formatDuration(seconds) {
-  if (seconds == null) return 'estimating...'
+  if (seconds == null || Number.isNaN(Number(seconds))) return '0s'
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
@@ -33,6 +33,7 @@ export default function SetupView() {
   const [syncing, setSyncing] = useState(false)
   const [logs, setLogs] = useState('')
   const [syncProgress, setSyncProgress] = useState(null)
+  const wasSyncRunningRef = useRef(false)
 
   async function loadStatus() {
     setLoading(true)
@@ -53,7 +54,19 @@ export default function SetupView() {
 
   useEffect(() => {
     loadStatus()
+    refreshSyncStatus({ announceCompletion: false }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!syncProgress?.running) return undefined
+    const timer = setInterval(() => {
+      refreshSyncStatus().catch(err => {
+        setError(err?.message || 'Failed to refresh sync status')
+        setSyncing(false)
+      })
+    }, 1500)
+    return () => clearInterval(timer)
+  }, [syncProgress?.running])
 
   const readyToSync = useMemo(() => {
     return Boolean(status?.anthropic_key && status?.whatsapp_db_found && status?.python_ready && status?.node_modules_found)
@@ -82,8 +95,37 @@ export default function SetupView() {
     }
   }
 
+  async function applySyncProgress(next, { announceCompletion = true } = {}) {
+    const wasRunning = wasSyncRunningRef.current
+    const isRunning = Boolean(next?.running)
+    wasSyncRunningRef.current = isRunning
+    setSyncing(isRunning)
+    setSyncProgress(next?.status === 'idle' ? null : next)
+    setLogs(next?.logs || '')
+
+    if (announceCompletion && wasRunning && !isRunning) {
+      if (next?.status === 'error') {
+        setError(next?.error || 'Sync failed')
+        return
+      }
+      if (next?.status === 'complete') {
+        await loadStatus()
+        setMessage('Sync complete. Your local dashboard is ready.')
+      }
+    }
+  }
+
+  async function refreshSyncStatus(options = {}) {
+    const statusResp = await fetch('/api/sync/status', { cache: 'no-store' })
+    const latest = await statusResp.json()
+    if (!statusResp.ok) throw new Error(latest?.error || `HTTP ${statusResp.status}`)
+    await applySyncProgress(latest, options)
+    return latest
+  }
+
   async function onSync(full = false) {
     setSyncing(true)
+    wasSyncRunningRef.current = false
     setError('')
     setMessage('')
     setLogs('')
@@ -97,28 +139,16 @@ export default function SetupView() {
       const data = await r.json()
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`)
 
-      let latest = data
-      setSyncProgress(latest)
-      setLogs(latest?.logs || '')
-
-      while (latest?.running) {
-        await new Promise(resolve => setTimeout(resolve, 1500))
-        const statusResp = await fetch('/api/sync/status', { cache: 'no-store' })
-        latest = await statusResp.json()
-        if (!statusResp.ok) throw new Error(latest?.error || `HTTP ${statusResp.status}`)
-        setSyncProgress(latest)
-        setLogs(latest?.logs || '')
+      await applySyncProgress(data)
+      if (data?.status === 'error') {
+        throw new Error(data?.error || 'Sync failed')
       }
-
-      if (latest?.status === 'error') {
-        throw new Error(latest?.error || 'Sync failed')
+      if (data?.status === 'complete') {
+        await loadStatus()
+        setMessage('Sync complete. Your local dashboard is ready.')
       }
-
-      await loadStatus()
-      setMessage('Sync complete. Your local dashboard is ready.')
     } catch (err) {
       setError(err?.message || 'Sync failed')
-    } finally {
       setSyncing(false)
     }
   }
@@ -178,7 +208,8 @@ export default function SetupView() {
         <section className="setup-card wide">
           <h2>3. Sync WhatsApp</h2>
           <p className="muted">
-            Sync exports chats locally, builds contacts and groups, asks Anthropic for summaries, and publishes local dashboard data.
+            Sync exports chats locally, builds contacts/groups, and publishes dashboard data.
+            Generate follow-ups and birthdays later from their tabs.
           </p>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button type="button" className="primary-btn" disabled={!readyToSync || syncing} onClick={() => onSync(false)}>

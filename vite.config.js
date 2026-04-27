@@ -514,6 +514,8 @@ export default defineConfig(({ mode }) => {
           const reviewQueuePath = path.join(outputDir, 'context_update_queue.json')
           const feedbackJudgePromptPath = path.join(promptsDir, 'feedback_judge_system_prompt.txt')
           const followupsDataPath = path.join(rootDir, 'public', 'data', 'followups.json')
+          const birthdaysDataPath = path.join(rootDir, 'public', 'data', 'birthdays.json')
+          const syncHistoryPath = path.join(outputDir, 'sync_history.json')
           const followupsSystemPromptPath = path.join(promptsDir, 'followups_system_prompt.txt')
 
           async function updateContactWatchlist(jid, onWatchlist) {
@@ -777,10 +779,16 @@ export default defineConfig(({ mode }) => {
           const syncSteps = [
             { script: 'export.py', label: 'Exporting WhatsApp chats' },
             { script: 'scripts/seed_watchlist.py', label: 'Building contacts and groups' },
-            { script: 'scripts/summarize.py', label: 'Generating AI summaries' },
-            { script: 'scripts/bundle_followups.py', label: 'Publishing follow-ups' },
             { script: 'scripts/bundle_chats_table.py', label: 'Publishing dashboard data' },
           ]
+          const DEFAULT_STEP_ESTIMATES = {
+            'export.py': 60,
+            'scripts/seed_watchlist.py': 15,
+            'scripts/bundle_chats_table.py': 5,
+            'scripts/summarize.py': 90,
+            'scripts/bundle_followups.py': 5,
+            'scripts/extract_birthdays.py': 60,
+          }
           const syncState = {
             id: null,
             running: false,
@@ -789,26 +797,63 @@ export default defineConfig(({ mode }) => {
             total_steps: syncSteps.length,
             current_step: null,
             started_at: null,
+            step_started_at: null,
             finished_at: null,
+            completed_step_seconds: [],
             error: null,
             logs: '',
           }
 
-          function getSyncStatePayload() {
+          async function getSyncHistory() {
+            const payload = await readJson(syncHistoryPath, {})
+            return payload && typeof payload === 'object' ? payload : {}
+          }
+
+          async function appendSyncHistory(script, seconds) {
+            if (!script || !Number.isFinite(seconds) || seconds < 0) return
+            const history = await getSyncHistory()
+            const current = Array.isArray(history[script]) ? history[script] : []
+            const next = [...current, Math.round(seconds)].filter(value => Number.isFinite(value) && value >= 0).slice(-5)
+            history[script] = next
+            await writeFile(syncHistoryPath, JSON.stringify(history, null, 2), 'utf8')
+          }
+
+          function estimateStepSeconds(stepScript, syncHistory) {
+            const sample = Array.isArray(syncHistory?.[stepScript]) ? syncHistory[stepScript] : []
+            if (sample.length) {
+              const avg = sample.reduce((sum, value) => sum + value, 0) / sample.length
+              return Math.max(1, Math.round(avg))
+            }
+            return DEFAULT_STEP_ESTIMATES[stepScript] ?? 30
+          }
+
+          async function getSyncStatePayload() {
             const startedMs = syncState.started_at ? Date.parse(syncState.started_at) : null
+            const stepStartedMs = syncState.step_started_at ? Date.parse(syncState.step_started_at) : null
             const finishedMs = syncState.finished_at ? Date.parse(syncState.finished_at) : null
             const endMs = finishedMs || Date.now()
             const elapsedSeconds = startedMs ? Math.max(0, Math.round((endMs - startedMs) / 1000)) : 0
-            const completedSteps = syncState.status === 'complete'
-              ? syncState.total_steps
-              : Math.max(0, syncState.step_index)
-            const estimatedRemainingSeconds = syncState.running && completedSteps > 0
-              ? Math.max(0, Math.round((elapsedSeconds / completedSteps) * (syncState.total_steps - completedSteps)))
-              : null
+            const currentStepElapsedSeconds = syncState.running && stepStartedMs
+              ? Math.max(0, Math.round((Date.now() - stepStartedMs) / 1000))
+              : 0
+            const activeSteps = Array.isArray(syncState.active_steps) && syncState.active_steps.length
+              ? syncState.active_steps
+              : syncSteps
+            const currentStepKey = activeSteps[syncState.step_index]?.script || null
+            const syncHistory = await getSyncHistory()
+            const currentStepEstimate = currentStepKey ? estimateStepSeconds(currentStepKey, syncHistory) : 0
+            const remainingCurrentStepSeconds = Math.max(0, currentStepEstimate - currentStepElapsedSeconds)
+            const estimatedFutureSeconds = activeSteps
+              .slice(syncState.step_index + 1)
+              .reduce((sum, step) => sum + estimateStepSeconds(step.script, syncHistory), 0)
+            const estimatedRemainingSeconds = syncState.running
+              ? Math.max(0, Math.round(remainingCurrentStepSeconds + estimatedFutureSeconds))
+              : 0
 
             return {
               ...syncState,
               elapsed_seconds: elapsedSeconds,
+              current_step_elapsed_seconds: currentStepElapsedSeconds,
               estimated_remaining_seconds: estimatedRemainingSeconds,
             }
           }
@@ -817,30 +862,38 @@ export default defineConfig(({ mode }) => {
             syncState.logs = `${syncState.logs}${text}`.slice(-30000)
           }
 
-          async function runSyncJob({ full }) {
+          async function runSyncJob({ full, steps = syncSteps }) {
             syncState.id = `${Date.now()}`
             syncState.running = true
             syncState.status = 'running'
             syncState.step_index = 0
-            syncState.total_steps = syncSteps.length
-            syncState.current_step = syncSteps[0]?.label || null
+            syncState.active_steps = steps
+            syncState.total_steps = steps.length
+            syncState.current_step = steps[0]?.label || null
             syncState.started_at = new Date().toISOString()
+            syncState.step_started_at = syncState.started_at
             syncState.finished_at = null
+            syncState.completed_step_seconds = []
             syncState.error = null
             syncState.logs = ''
 
             try {
-              for (let i = 0; i < syncSteps.length; i += 1) {
-                const step = syncSteps[i]
+              for (let i = 0; i < steps.length; i += 1) {
+                const step = steps[i]
                 const args = step.script === 'export.py' && full ? ['--full'] : []
                 syncState.step_index = i
                 syncState.current_step = step.label
+                syncState.step_started_at = new Date().toISOString()
                 appendSyncLog(`\n$ ${step.script}${args.length ? ` ${args.join(' ')}` : ''}\n`)
                 const result = await runPythonStep(step.script, args, appendSyncLog)
+                const stepSeconds = Math.max(0, (Date.now() - Date.parse(syncState.step_started_at)) / 1000)
+                syncState.completed_step_seconds.push(stepSeconds)
+                await appendSyncHistory(step.script, stepSeconds)
                 if (result.logs && !syncState.logs.includes(result.logs)) appendSyncLog(`${result.logs}\n`)
               }
               syncState.step_index = syncState.total_steps
               syncState.current_step = 'Done'
+              syncState.step_started_at = null
               syncState.status = 'complete'
             } catch (err) {
               syncState.status = 'error'
@@ -849,6 +902,7 @@ export default defineConfig(({ mode }) => {
             } finally {
               syncState.running = false
               syncState.finished_at = new Date().toISOString()
+              syncState.active_steps = null
             }
           }
 
@@ -862,14 +916,14 @@ export default defineConfig(({ mode }) => {
               return
             }
             if (syncState.running) {
-              sendJson(res, 202, getSyncStatePayload())
+              sendJson(res, 202, await getSyncStatePayload())
               return
             }
 
             try {
               const body = await readRequestJson(req).catch(() => ({}))
               runSyncJob({ full: Boolean(body?.full) })
-              sendJson(res, 202, getSyncStatePayload())
+              sendJson(res, 202, await getSyncStatePayload())
             } catch (err) {
               sendJson(res, 500, { error: err?.message || 'Sync failed' })
             }
@@ -880,7 +934,7 @@ export default defineConfig(({ mode }) => {
               sendJson(res, 405, { error: 'Method not allowed' })
               return
             }
-            sendJson(res, 200, getSyncStatePayload())
+            sendJson(res, 200, await getSyncStatePayload())
           })
 
           server.middlewares.use('/api/chat', async (req, res) => {
@@ -1298,6 +1352,39 @@ export default defineConfig(({ mode }) => {
               res.end(JSON.stringify({ error: err?.message || 'Failed to regenerate follow-ups' }))
             } finally {
               isSyncingFollowups = false
+            }
+          })
+
+          server.middlewares.use('/api/sync-birthdays', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            if (syncState.running) {
+              sendJson(res, 409, { error: 'Another sync job is already in progress' })
+              return
+            }
+            runSyncJob({
+              full: false,
+              steps: [{ script: 'scripts/extract_birthdays.py', label: 'Generating birthdays' }],
+            })
+            sendJson(res, 202, await getSyncStatePayload())
+          })
+
+          server.middlewares.use('/api/birthdays', async (req, res, next) => {
+            if (req.url && req.url !== '/' && req.url !== '') {
+              next()
+              return
+            }
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const payload = await readJson(birthdaysDataPath, { generated_at: null, items: [] })
+              sendJson(res, 200, payload)
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to load birthdays' })
             }
           })
         },
