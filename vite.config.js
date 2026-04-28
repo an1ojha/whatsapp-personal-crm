@@ -22,6 +22,120 @@ const CALLS_CACHE = {
   rows: null,
 }
 
+const CRM_CONTEXT_CACHE = {
+  key: null,
+  builtAtMs: 0,
+  value: '',
+}
+
+const CRM_TOOLS = [
+  {
+    name: 'search_people',
+    description: 'Find contacts by name, relation, category, or watchlist.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        on_watchlist: { type: 'boolean' },
+        category: { type: 'string', enum: ['startup', 'personal', 'family', 'logistics'] },
+        relation_contains: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_person',
+    description: 'Get full CRM profile and summary for one person.',
+    input_schema: {
+      type: 'object',
+      required: ['jid'],
+      properties: {
+        jid: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_chat_summary',
+    description: 'Get rolling summary and open threads for a chat jid.',
+    input_schema: {
+      type: 'object',
+      required: ['jid'],
+      properties: {
+        jid: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_followups',
+    description: 'List active followups with optional filters.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        urgency: { type: 'string', enum: ['today', 'tomorrow', 'week', 'next'] },
+        category: { type: 'string', enum: ['startup', 'personal', 'family', 'logistics'] },
+        jid: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_messages',
+    description: 'Regex search raw chat messages by chat/date/sender.',
+    input_schema: {
+      type: 'object',
+      required: ['query'],
+      properties: {
+        jid: { type: 'string' },
+        query: { type: 'string' },
+        from_me: { type: 'boolean' },
+        since: { type: 'string' },
+        until: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_messages',
+    description: 'List messages in one chat with date and order controls.',
+    input_schema: {
+      type: 'object',
+      required: ['jid'],
+      properties: {
+        jid: { type: 'string' },
+        since: { type: 'string' },
+        until: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        order: { type: 'string', enum: ['asc', 'desc'] },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_calendar_event',
+    description: 'Create an event on the user\'s primary Google Calendar via Composio. Use ISO 8601 datetimes. For all-day or recurring events (e.g. birthdays), pass an RRULE string in `recurrence` like "RRULE:FREQ=YEARLY". Confirm details with the user before calling unless they were explicit.',
+    input_schema: {
+      type: 'object',
+      required: ['summary', 'start_datetime', 'end_datetime'],
+      properties: {
+        summary: { type: 'string', description: 'Event title.' },
+        description: { type: 'string' },
+        location: { type: 'string' },
+        start_datetime: { type: 'string', description: 'ISO 8601 start, e.g. 2026-05-01T10:00:00 (interpreted in `timezone` if given, else UTC).' },
+        end_datetime: { type: 'string', description: 'ISO 8601 end, must be after start.' },
+        timezone: { type: 'string', description: 'IANA timezone, e.g. America/Los_Angeles. Defaults to UTC.' },
+        attendees: { type: 'array', items: { type: 'string' }, description: 'Attendee email addresses.' },
+        recurrence: { type: 'array', items: { type: 'string' }, description: 'RFC5545 RRULE strings, e.g. ["RRULE:FREQ=YEARLY"].' },
+      },
+      additionalProperties: false,
+    },
+  },
+]
+
 async function readJson(filePath, fallback) {
   try {
     return JSON.parse(await readFile(filePath, 'utf8'))
@@ -108,6 +222,29 @@ async function getAnthropicConfig(rootDir, viteEnv = {}) {
   }
 }
 
+async function getComposioConfig(rootDir, viteEnv = {}) {
+  const { values } = await readLocalEnv(rootDir)
+  return {
+    apiKey: values.COMPOSIO_API_KEY || process.env.COMPOSIO_API_KEY || viteEnv.COMPOSIO_API_KEY || '',
+    userId: values.COMPOSIO_USER_ID || process.env.COMPOSIO_USER_ID || viteEnv.COMPOSIO_USER_ID || '',
+    authConfigId: values.COMPOSIO_AUTH_CONFIG_ID || process.env.COMPOSIO_AUTH_CONFIG_ID || viteEnv.COMPOSIO_AUTH_CONFIG_ID || '',
+    connectionId: values.COMPOSIO_CONNECTION_ID || process.env.COMPOSIO_CONNECTION_ID || viteEnv.COMPOSIO_CONNECTION_ID || '',
+  }
+}
+
+let composioModulePromise = null
+async function getComposioClient(apiKey) {
+  if (!apiKey) throw new Error('Missing Composio API key. Open Setup → Google Calendar.')
+  if (!composioModulePromise) composioModulePromise = import('@composio/core')
+  const mod = await composioModulePromise
+  return new mod.Composio({ apiKey })
+}
+
+function makeComposioUserId() {
+  const rand = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 6)
+  return `crm_${rand}`
+}
+
 function buildLegacyWatchlistPayload(contacts, generatedAt) {
   const chats = contacts
     .filter(contact => Boolean(contact?.on_watchlist))
@@ -157,6 +294,47 @@ function normalizeRelation(value) {
   const cleaned = String(value || '').toLowerCase().replace(/[^a-z ]+/g, ' ')
   const words = cleaned.split(/\s+/).filter(Boolean).slice(0, 2)
   return words.join(' ')
+}
+
+function normalizePersonName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function textValue(block) {
+  if (!block) return ''
+  if (typeof block === 'string') return block
+  if (Array.isArray(block)) return block.map(textValue).join('\n')
+  if (typeof block?.text === 'string') return block.text
+  return ''
+}
+
+function parseDateInput(rawValue, { now = new Date() } = {}) {
+  const raw = String(rawValue || '').trim().toLowerCase()
+  if (!raw) return null
+  const absolute = Date.parse(raw)
+  if (!Number.isNaN(absolute)) return new Date(absolute)
+  const rel = raw.match(/^(\d+)\s*(day|days|week|weeks|month|months)$/)
+  if (rel) {
+    const count = Number.parseInt(rel[1], 10)
+    const unit = rel[2]
+    let days = count
+    if (unit.startsWith('week')) days = count * 7
+    if (unit.startsWith('month')) days = count * 30
+    const d = new Date(now)
+    d.setDate(d.getDate() - days)
+    return d
+  }
+  return null
+}
+
+function truncateText(value, max = 500) {
+  const text = String(value || '')
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}...`
 }
 
 function normalizeContextPatch(raw = {}, base = {}) {
@@ -408,17 +586,21 @@ async function getWhatsAppCalls(rootDir) {
 async function buildPeopleRows(rootDir) {
   const contactsPath = path.join(rootDir, 'output', 'contacts.json')
   const followupsPath = path.join(rootDir, 'public', 'data', 'followups.json')
+  const birthdaysPath = path.join(rootDir, 'public', 'data', 'birthdays.json')
   const indexPath = path.join(rootDir, 'output', 'index.json')
 
   const contactsPayload = await readJson(contactsPath, { contacts: [], generated_at: null })
   const followupsPayload = await readJson(followupsPath, { items: [] })
+  const birthdaysPayload = await readJson(birthdaysPath, { items: [] })
   const indexRows = await readJson(indexPath, [])
 
   const contacts = Array.isArray(contactsPayload?.contacts) ? contactsPayload.contacts : []
   const photoIndex = await getWhatsAppPhotoIndex(rootDir)
   const followups = Array.isArray(followupsPayload?.items) ? followupsPayload.items : []
+  const birthdays = Array.isArray(birthdaysPayload?.items) ? birthdaysPayload.items : []
   const dmIndexByJid = new Map()
   const followupsByKey = new Map()
+  const bestBirthdayByName = new Map()
 
   for (const row of Array.isArray(indexRows) ? indexRows : []) {
     if (!row || row.type !== 'dm' || !row.jid) continue
@@ -429,6 +611,22 @@ async function buildPeopleRows(rootDir) {
     const keys = [item?.jid, item?.jkey].filter(Boolean)
     for (const key of keys) {
       followupsByKey.set(key, (followupsByKey.get(key) || 0) + 1)
+    }
+  }
+
+  for (const item of birthdays) {
+    const birthdayPersonName = String(item?.birthday_person_name || '').trim()
+    if (!birthdayPersonName || birthdayPersonName.toLowerCase() === 'unknown') continue
+    const key = normalizePersonName(birthdayPersonName)
+    if (!key) continue
+    const confidence = Number(item?.confidence || 0)
+    const current = bestBirthdayByName.get(key)
+    if (!current || confidence > Number(current?.confidence || 0)) {
+      bestBirthdayByName.set(key, {
+        date: String(item?.date || '').trim(),
+        confidence,
+        source_chat: String(item?.chat_person_name || '').trim(),
+      })
     }
   }
 
@@ -455,9 +653,21 @@ async function buildPeopleRows(rootDir) {
         }
       }
 
+      const autoBirthday = bestBirthdayByName.get(normalizePersonName(contact?.name || '')) || null
+      const manualBirthday = String(contact?.birthday || '').trim()
+      const birthday = manualBirthday || String(autoBirthday?.date || '')
+      const birthdayConfidence = manualBirthday
+        ? Number(contact?.birthday_confidence || 1)
+        : Number(autoBirthday?.confidence || 0)
+      const birthdaySourceChat = manualBirthday
+        ? String(contact?.birthday_source_chat || 'manual')
+        : String(autoBirthday?.source_chat || '')
       return {
         ...contact,
         relation: contact?.context?.relation || contact?.relation || '',
+        birthday,
+        birthday_confidence: birthdayConfidence,
+        birthday_source_chat: birthdaySourceChat,
         photo_url: photoIndex.has(contact?.jid || '')
           ? `/api/people/photo?jid=${encodeURIComponent(contact?.jid || '')}`
           : '',
@@ -478,6 +688,7 @@ async function getPeopleRows(rootDir) {
     await getFileStamp(path.join(rootDir, 'output', 'contacts.json')),
     await getFileStamp(path.join(rootDir, 'output', 'index.json')),
     await getFileStamp(path.join(rootDir, 'public', 'data', 'followups.json')),
+    await getFileStamp(path.join(rootDir, 'public', 'data', 'birthdays.json')),
   ].join('|')
 
   if (PEOPLE_CACHE.key === cacheKey && Array.isArray(PEOPLE_CACHE.rows)) {
@@ -515,8 +726,10 @@ export default defineConfig(({ mode }) => {
           const feedbackJudgePromptPath = path.join(promptsDir, 'feedback_judge_system_prompt.txt')
           const followupsDataPath = path.join(rootDir, 'public', 'data', 'followups.json')
           const birthdaysDataPath = path.join(rootDir, 'public', 'data', 'birthdays.json')
+          const groupBirthdaysDataPath = path.join(rootDir, 'public', 'data', 'group_birthdays.json')
           const syncHistoryPath = path.join(outputDir, 'sync_history.json')
           const followupsSystemPromptPath = path.join(promptsDir, 'followups_system_prompt.txt')
+          const qaSystemPromptPath = path.join(promptsDir, 'qa_system_prompt.txt')
 
           async function updateContactWatchlist(jid, onWatchlist) {
             const contactsPayload = await readJson(outputContactsPath, { contacts: [], _meta: {} })
@@ -560,6 +773,18 @@ export default defineConfig(({ mode }) => {
             }
             if (typeof patch?.on_watchlist === 'boolean') {
               contact.on_watchlist = String(contact?.jid || '').endsWith('@g.us') ? false : patch.on_watchlist
+            }
+            if (typeof patch?.birthday === 'string') {
+              const rawBirthday = patch.birthday.trim()
+              if (!rawBirthday) {
+                contact.birthday = ''
+                contact.birthday_confidence = 0
+                contact.birthday_source_chat = ''
+              } else if (/^\d{2}-[A-Za-z]{3}$/.test(rawBirthday)) {
+                contact.birthday = `${rawBirthday.slice(0, 2)}-${rawBirthday.slice(3, 4).toUpperCase()}${rawBirthday.slice(4).toLowerCase()}`
+                contact.birthday_confidence = 1
+                contact.birthday_source_chat = 'manual'
+              }
             }
             contact.context = { ...nextContext, context_last_updated: now }
             contact.updated_at = now
@@ -691,6 +916,325 @@ export default defineConfig(({ mode }) => {
             }
           }
 
+          function getNormalizedLimit(value, fallback = 20) {
+            const parsed = Number.parseInt(value, 10)
+            if (!Number.isFinite(parsed)) return fallback
+            return Math.max(1, Math.min(parsed, 50))
+          }
+
+          function getChatFileByJid(indexRows = []) {
+            const out = new Map()
+            for (const row of indexRows) {
+              if (!row?.jid || !row?.file) continue
+              out.set(row.jid, row.file)
+            }
+            return out
+          }
+
+          async function loadCrmContext() {
+            const contactsPath = path.join(rootDir, 'output', 'contacts.json')
+            const indexPath = path.join(rootDir, 'output', 'index.json')
+            const summariesIndexPath = path.join(rootDir, 'public', 'data', 'summaries_index.json')
+            const cacheKey = [
+              await getFileStamp(contactsPath),
+              await getFileStamp(indexPath),
+              await getFileStamp(summariesIndexPath),
+              await getFileStamp(followupsDataPath),
+              await getFileStamp(followupStatePath),
+              await getFileStamp(qaSystemPromptPath),
+            ].join('|')
+            const nowMs = Date.now()
+            if (CRM_CONTEXT_CACHE.key === cacheKey && nowMs - CRM_CONTEXT_CACHE.builtAtMs < 60000) {
+              return CRM_CONTEXT_CACHE.value
+            }
+
+            const contactsPayload = await readJson(contactsPath, { generated_at: null, contacts: [] })
+            const indexRows = await readJson(indexPath, [])
+            const summariesIndex = await readJson(summariesIndexPath, { generated_at: null, chats: [] })
+            const followupsPayload = await loadActiveFollowups()
+            const qaPrompt = await readFile(qaSystemPromptPath, 'utf8').catch(() => '')
+
+            const followups = Array.isArray(followupsPayload?.items) ? followupsPayload.items : []
+            const followupsByKey = new Map()
+            for (const item of followups) {
+              const keys = [item?.jid, item?.jkey].filter(Boolean)
+              for (const key of keys) {
+                followupsByKey.set(key, (followupsByKey.get(key) || 0) + 1)
+              }
+            }
+            const contacts = Array.isArray(contactsPayload?.contacts) ? contactsPayload.contacts : []
+            const byJid = new Map((Array.isArray(indexRows) ? indexRows : []).map(row => [row?.jid, row]).filter(([jid]) => Boolean(jid)))
+            const directory = contacts.slice(0, 300).map(contact => {
+              const row = byJid.get(contact?.jid || '')
+              const relation = contact?.context?.relation || contact?.relation || ''
+              const openFollowups = followupsByKey.get(contact?.jid || '') || followupsByKey.get(contact?.jkey || '') || 0
+              return [
+                contact?.jid || '',
+                contact?.name || '',
+                contact?.category || '',
+                relation,
+                contact?.on_watchlist ? 'watchlist' : 'not_watchlist',
+                row?.last_message || contact?.last_message || '',
+                String(openFollowups),
+              ].join(' | ')
+            })
+
+            const summaryLines = Array.isArray(summariesIndex?.chats)
+              ? summariesIndex.chats.slice(0, 200).map(chat => {
+                const line = truncateText(chat?.summary_line || '', 260)
+                return `${chat?.jid || ''} | ${chat?.name || ''} | ${line}`
+              })
+              : []
+
+            const prompt = [
+              qaPrompt.trim(),
+              '',
+              `today_iso: ${new Date().toISOString().slice(0, 10)}`,
+              `generated_at: ${new Date().toISOString()}`,
+              '',
+              'directory_columns: jid | name | category | relation | watchlist_status | last_msg_date | open_followups',
+              'directory:',
+              directory.join('\n'),
+              '',
+              'active_followups_json:',
+              JSON.stringify(followups.slice(0, 120)),
+              '',
+              'chat_summary_lines: jid | name | summary_line',
+              summaryLines.join('\n'),
+            ].join('\n')
+
+            CRM_CONTEXT_CACHE.key = cacheKey
+            CRM_CONTEXT_CACHE.builtAtMs = nowMs
+            CRM_CONTEXT_CACHE.value = prompt
+            return prompt
+          }
+
+          async function readChatMessagesByJid(jid) {
+            const indexRows = await readJson(path.join(rootDir, 'output', 'index.json'), [])
+            const byJid = getChatFileByJid(indexRows)
+            const file = byJid.get(jid)
+            if (!file) return []
+            const chatPath = path.join(rootDir, 'output', file)
+            const lines = createInterface({
+              input: createReadStream(chatPath, { encoding: 'utf8' }),
+              crlfDelay: Infinity,
+            })
+            const rows = []
+            for await (const line of lines) {
+              if (!line.trim()) continue
+              try {
+                rows.push(JSON.parse(line))
+              } catch {
+                // Ignore malformed lines.
+              }
+            }
+            return rows
+          }
+
+          async function executeTool(name, input = {}) {
+            const contactsPayload = await readJson(path.join(rootDir, 'output', 'contacts.json'), { contacts: [] })
+            const contacts = Array.isArray(contactsPayload?.contacts) ? contactsPayload.contacts : []
+            const followupsPayload = await loadActiveFollowups()
+            const followups = Array.isArray(followupsPayload?.items) ? followupsPayload.items : []
+            const indexRows = await readJson(path.join(rootDir, 'output', 'index.json'), [])
+            const indexByJid = new Map((Array.isArray(indexRows) ? indexRows : []).map(row => [row?.jid, row]).filter(([jid]) => Boolean(jid)))
+
+            if (name === 'search_people') {
+              const query = String(input?.query || '').trim().toLowerCase()
+              const relationContains = String(input?.relation_contains || '').trim().toLowerCase()
+              const onWatchlist = typeof input?.on_watchlist === 'boolean' ? input.on_watchlist : null
+              const category = String(input?.category || '').trim()
+              const limit = getNormalizedLimit(input?.limit, 20)
+              const rows = contacts
+                .filter(contact => {
+                  if (onWatchlist !== null && Boolean(contact?.on_watchlist) !== onWatchlist) return false
+                  if (category && contact?.category !== category) return false
+                  const relation = String(contact?.context?.relation || contact?.relation || '').toLowerCase()
+                  if (relationContains && !relation.includes(relationContains)) return false
+                  if (!query) return true
+                  const hay = [
+                    contact?.jid,
+                    contact?.name,
+                    contact?.category,
+                    relation,
+                  ].join(' ').toLowerCase()
+                  return hay.includes(query)
+                })
+                .slice(0, limit)
+                .map(contact => ({
+                  jid: contact?.jid || '',
+                  name: contact?.name || '',
+                  category: contact?.category || '',
+                  relation: contact?.context?.relation || contact?.relation || '',
+                  on_watchlist: Boolean(contact?.on_watchlist),
+                  last_message: indexByJid.get(contact?.jid || '')?.last_message || contact?.last_message || '',
+                }))
+              return { count: rows.length, items: rows }
+            }
+
+            if (name === 'list_followups') {
+              const urgency = String(input?.urgency || '').trim()
+              const category = String(input?.category || '').trim()
+              const jid = String(input?.jid || '').trim()
+              const limit = getNormalizedLimit(input?.limit, 25)
+              const rows = followups
+                .filter(item => (!urgency || item?.urgency === urgency))
+                .filter(item => (!category || item?.category === category))
+                .filter(item => (!jid || item?.jid === jid))
+                .slice(0, limit)
+              return { count: rows.length, items: rows }
+            }
+
+            if (name === 'get_chat_summary') {
+              const jid = String(input?.jid || '').trim()
+              if (!jid) return { error: 'Expected jid' }
+              const jkey = jid.replace(/[@.]/g, '_')
+              const summaryPath = path.join(rootDir, 'summaries', `${jkey}.json`)
+              const summary = await readJson(summaryPath, null)
+              if (!summary) return { error: 'No summary found for jid', jid }
+              return summary
+            }
+
+            if (name === 'get_person') {
+              const jid = String(input?.jid || '').trim()
+              if (!jid) return { error: 'Expected jid' }
+              const contact = contacts.find(row => row?.jid === jid)
+              if (!contact) return { error: 'Contact not found', jid }
+              const jkey = contact?.jkey || jid.replace(/[@.]/g, '_')
+              const summary = await readJson(path.join(rootDir, 'summaries', `${jkey}.json`), null)
+              const personFollowups = followups.filter(item => item?.jid === jid || item?.jkey === jkey).slice(0, 50)
+              return {
+                contact,
+                summary,
+                followups: personFollowups,
+                chat_index: indexByJid.get(jid) || null,
+              }
+            }
+
+            if (name === 'search_messages' || name === 'list_messages') {
+              const jid = String(input?.jid || '').trim()
+              const limit = getNormalizedLimit(input?.limit, 25)
+              const sinceDate = parseDateInput(input?.since)
+              const untilDate = parseDateInput(input?.until)
+              const fromMe = typeof input?.from_me === 'boolean' ? input.from_me : null
+              const query = String(input?.query || '').trim()
+              const order = String(input?.order || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc'
+              const regex = name === 'search_messages'
+                ? new RegExp(query, 'i')
+                : null
+              const files = []
+              if (jid) {
+                const row = indexByJid.get(jid)
+                if (!row?.file) return { error: 'jid not found in chat index', jid }
+                files.push({ jid, file: row.file })
+              } else if (name === 'search_messages') {
+                for (const row of indexRows) {
+                  if (!row?.jid || !row?.file) continue
+                  files.push({ jid: row.jid, file: row.file })
+                }
+              } else {
+                return { error: 'list_messages requires jid' }
+              }
+
+              const rows = []
+              for (const target of files) {
+                const chatPath = path.join(rootDir, 'output', target.file)
+                const lines = createInterface({
+                  input: createReadStream(chatPath, { encoding: 'utf8' }),
+                  crlfDelay: Infinity,
+                })
+                for await (const line of lines) {
+                  if (!line.trim()) continue
+                  let msg = null
+                  try {
+                    msg = JSON.parse(line)
+                  } catch {
+                    continue
+                  }
+                  const ts = Date.parse(msg?.timestamp || '')
+                  if (sinceDate && Number.isFinite(ts) && ts < sinceDate.getTime()) continue
+                  if (untilDate && Number.isFinite(ts) && ts > untilDate.getTime()) continue
+                  if (fromMe !== null && Boolean(msg?.from_me) !== fromMe) continue
+                  const text = String(msg?.text || '')
+                  if (regex && !regex.test(text)) continue
+                  rows.push({
+                    jid: target.jid,
+                    pk: msg?.pk || null,
+                    timestamp: msg?.timestamp || '',
+                    from_me: Boolean(msg?.from_me),
+                    sender: msg?.sender || '',
+                    text: truncateText(text, 500),
+                  })
+                }
+              }
+
+              rows.sort((a, b) => {
+                const ta = Date.parse(a?.timestamp || '')
+                const tb = Date.parse(b?.timestamp || '')
+                if (order === 'asc') return ta - tb
+                return tb - ta
+              })
+              return {
+                count: rows.length,
+                items: rows.slice(0, limit),
+              }
+            }
+
+            if (name === 'create_calendar_event') {
+              const { apiKey, userId, connectionId } = await getComposioConfig(rootDir, env)
+              if (!apiKey) return { error: 'Composio API key not configured. Open Setup → Google Calendar.' }
+              if (!userId || !connectionId) {
+                return { error: 'Google Calendar is not connected. Open Setup → Google Calendar → Connect Google Calendar.' }
+              }
+              const summary = String(input?.summary || '').trim()
+              const startDatetime = String(input?.start_datetime || '').trim()
+              const endDatetime = String(input?.end_datetime || '').trim()
+              if (!summary || !startDatetime || !endDatetime) {
+                return { error: 'create_calendar_event requires summary, start_datetime, end_datetime.' }
+              }
+              const args = {
+                calendar_id: 'primary',
+                summary,
+                start_datetime: startDatetime,
+                end_datetime: endDatetime,
+              }
+              if (typeof input?.description === 'string' && input.description.trim()) args.description = input.description.trim()
+              if (typeof input?.location === 'string' && input.location.trim()) args.location = input.location.trim()
+              if (typeof input?.timezone === 'string' && input.timezone.trim()) args.timezone = input.timezone.trim()
+              if (Array.isArray(input?.attendees) && input.attendees.length) {
+                args.attendees = input.attendees.map(value => String(value || '').trim()).filter(Boolean)
+              }
+              if (Array.isArray(input?.recurrence) && input.recurrence.length) {
+                args.recurrence = input.recurrence.map(value => String(value || '').trim()).filter(Boolean)
+              }
+              try {
+                const composio = await getComposioClient(apiKey)
+                const result = await composio.tools.execute('GOOGLECALENDAR_CREATE_EVENT', {
+                  userId,
+                  connectedAccountId: connectionId,
+                  arguments: args,
+                  dangerouslySkipVersionCheck: true,
+                })
+                if (result?.successful === false || result?.error) {
+                  return { error: result?.error || 'Composio reported the calendar call failed.', details: result }
+                }
+                const data = result?.data || result
+                return {
+                  ok: true,
+                  event_id: data?.id || data?.event_id || null,
+                  html_link: data?.htmlLink || data?.html_link || null,
+                  start: data?.start || null,
+                  end: data?.end || null,
+                  summary,
+                }
+              } catch (err) {
+                return { error: err?.message || 'Failed to create calendar event' }
+              }
+            }
+
+            return { error: `Unknown tool: ${name}` }
+          }
+
           async function runPythonStep(script, args = [], onChunk = () => {}) {
             return await new Promise((resolve, reject) => {
               const child = spawn('.venv/bin/python', [script, ...args], {
@@ -776,6 +1320,159 @@ export default defineConfig(({ mode }) => {
             }
           })
 
+          async function getComposioStatusPayload() {
+            const cfg = await getComposioConfig(rootDir, env)
+            const payload = {
+              has_api_key: Boolean(cfg.apiKey),
+              has_user_id: Boolean(cfg.userId),
+              has_auth_config: Boolean(cfg.authConfigId),
+              has_connection: Boolean(cfg.connectionId),
+              connection_status: null,
+              connection_account: null,
+              toolkit: 'googlecalendar',
+              error: null,
+            }
+            if (cfg.apiKey && cfg.connectionId) {
+              try {
+                const composio = await getComposioClient(cfg.apiKey)
+                const account = await composio.connectedAccounts.get(cfg.connectionId)
+                payload.connection_status = String(account?.status || '').toUpperCase() || null
+                payload.connection_account =
+                  account?.data?.email
+                  || account?.data?.profile?.email
+                  || account?.data?.user?.email
+                  || account?.data?.account?.email
+                  || account?.toolkit?.slug
+                  || null
+              } catch (err) {
+                payload.error = err?.message || 'Failed to load Composio connection'
+              }
+            }
+            return payload
+          }
+
+          server.middlewares.use('/api/composio/status', async (req, res) => {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              sendJson(res, 200, await getComposioStatusPayload())
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to load Composio status' })
+            }
+          })
+
+          server.middlewares.use('/api/composio/env', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const body = await readRequestJson(req)
+              const apiKey = String(body?.api_key || '').trim()
+              if (!apiKey) {
+                sendJson(res, 400, { error: 'Composio API key is required' })
+                return
+              }
+              await writeLocalEnv(rootDir, { COMPOSIO_API_KEY: apiKey })
+              process.env.COMPOSIO_API_KEY = apiKey
+              sendJson(res, 200, { ok: true, status: await getComposioStatusPayload() })
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to save Composio key' })
+            }
+          })
+
+          server.middlewares.use('/api/composio/connect', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const cfg = await getComposioConfig(rootDir, env)
+              if (!cfg.apiKey) {
+                sendJson(res, 400, { error: 'Save your Composio API key first.' })
+                return
+              }
+
+              const composio = await getComposioClient(cfg.apiKey)
+              const updates = {}
+
+              let userId = cfg.userId
+              if (!userId) {
+                userId = makeComposioUserId()
+                updates.COMPOSIO_USER_ID = userId
+              }
+
+              let authConfigId = cfg.authConfigId
+              if (!authConfigId) {
+                try {
+                  const created = await composio.authConfigs.create('googlecalendar', {
+                    type: 'use_composio_managed_auth',
+                    name: 'Personal CRM Google Calendar',
+                  })
+                  authConfigId = created?.id || created?.auth_config?.id || created?.authConfig?.id
+                } catch (createErr) {
+                  sendJson(res, 502, {
+                    error: `Could not create a Composio auth config automatically: ${createErr?.message || createErr}. Create one for the googlecalendar toolkit at https://platform.composio.dev/ and add COMPOSIO_AUTH_CONFIG_ID=ac_... to your .env.`,
+                  })
+                  return
+                }
+                if (!authConfigId) {
+                  sendJson(res, 502, { error: 'Composio did not return an auth config id.' })
+                  return
+                }
+                updates.COMPOSIO_AUTH_CONFIG_ID = authConfigId
+              }
+
+              const connection = await composio.connectedAccounts.initiate(userId, authConfigId)
+              const connectionId = connection?.id
+              const redirectUrl = connection?.redirectUrl || null
+              if (!connectionId) {
+                sendJson(res, 502, { error: 'Composio did not return a connection id.' })
+                return
+              }
+              updates.COMPOSIO_CONNECTION_ID = connectionId
+
+              await writeLocalEnv(rootDir, updates)
+              for (const [k, v] of Object.entries(updates)) process.env[k] = v
+
+              sendJson(res, 200, {
+                ok: true,
+                connection_id: connectionId,
+                redirect_url: redirectUrl,
+                user_id: userId,
+                auth_config_id: authConfigId,
+              })
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to start Google Calendar connection' })
+            }
+          })
+
+          server.middlewares.use('/api/composio/disconnect', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const cfg = await getComposioConfig(rootDir, env)
+              if (cfg.apiKey && cfg.connectionId) {
+                try {
+                  const composio = await getComposioClient(cfg.apiKey)
+                  await composio.connectedAccounts.delete(cfg.connectionId)
+                } catch (err) {
+                  // Continue: clear local state even if Composio delete failed.
+                  console.warn('[composio] disconnect failed:', err?.message || err)
+                }
+              }
+              await writeLocalEnv(rootDir, { COMPOSIO_CONNECTION_ID: '' })
+              process.env.COMPOSIO_CONNECTION_ID = ''
+              sendJson(res, 200, { ok: true, status: await getComposioStatusPayload() })
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to disconnect Google Calendar' })
+            }
+          })
+
           const syncSteps = [
             { script: 'export.py', label: 'Exporting WhatsApp chats' },
             { script: 'scripts/seed_watchlist.py', label: 'Building contacts and groups' },
@@ -802,6 +1499,46 @@ export default defineConfig(({ mode }) => {
             completed_step_seconds: [],
             error: null,
             logs: '',
+          }
+          const birthdaysState = {
+            running: false,
+            status: 'idle',
+            /** 'dm' | 'group' — which scope is currently running during generate */
+            scope: 'dm',
+            phase: 'scan',
+            chats_done: 0,
+            chats_total: 0,
+            refs_found: 0,
+            chats_left: 0,
+            refs_done: 0,
+            refs_total: 0,
+            rows_ready: 0,
+            started_at: null,
+            finished_at: null,
+            error: null,
+            logs: '',
+          }
+
+          function appendBirthdayLog(text) {
+            birthdaysState.logs = `${birthdaysState.logs}${text}`.slice(-30000)
+          }
+
+          function applyBirthdayProgressChunk(chunk) {
+            const lines = String(chunk || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+            for (const line of lines) {
+              if (!line.startsWith('PROGRESS ')) continue
+              const payload = line.slice('PROGRESS '.length).trim()
+              const tokens = payload.split(/\s+/)
+              for (const token of tokens) {
+                const [k, v] = token.split('=')
+                if (!k || v == null) continue
+                if (k === 'phase') birthdaysState.phase = v
+                else if (['chats_done', 'chats_total', 'refs_found', 'chats_left', 'refs_done', 'refs_total', 'rows_ready'].includes(k)) {
+                  const n = Number.parseInt(v, 10)
+                  if (Number.isFinite(n)) birthdaysState[k] = n
+                }
+              }
+            }
           }
 
           async function getSyncHistory() {
@@ -964,7 +1701,7 @@ export default defineConfig(({ mode }) => {
                 if (messages.length) {
                   for (const m of messages) {
                     if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue
-                    const text = (m.content || '').toString()
+                    const text = textValue(m.content || '')
                     if (!text) continue
                     history.push({ role: m.role, content: text })
                   }
@@ -979,34 +1716,72 @@ export default defineConfig(({ mode }) => {
                   return
                 }
 
-                const anthropicResp = await fetch('https://api.anthropic.com/v1/messages', {
-                  method: 'POST',
-                  headers: {
-                    'content-type': 'application/json',
-                    'x-api-key': anthropicKey,
-                    'anthropic-version': '2023-06-01',
-                  },
-                  body: JSON.stringify({
-                    model: anthropicModel,
-                    max_tokens: 1200,
-                    system: 'You are a helpful assistant for general Q&A.',
-                    messages: history,
-                  }),
-                })
+                const runtimeSystemPrompt = await loadCrmContext()
+                const turnMessages = [...history]
+                const toolCalls = []
+                let finalText = ''
 
-                const json = await anthropicResp.json()
-                if (!anthropicResp.ok) {
-                  res.statusCode = anthropicResp.status
-                  res.setHeader('Content-Type', 'application/json')
-                  res.end(JSON.stringify({ error: json?.error?.message || 'Anthropic request failed' }))
-                  return
+                for (let i = 0; i < 6; i += 1) {
+                  const anthropicResp = await fetch('https://api.anthropic.com/v1/messages', {
+                    method: 'POST',
+                    headers: {
+                      'content-type': 'application/json',
+                      'x-api-key': anthropicKey,
+                      'anthropic-version': '2023-06-01',
+                    },
+                    body: JSON.stringify({
+                      model: anthropicModel,
+                      max_tokens: 1200,
+                      system: runtimeSystemPrompt,
+                      tools: CRM_TOOLS,
+                      messages: turnMessages,
+                    }),
+                  })
+
+                  const json = await anthropicResp.json()
+                  if (!anthropicResp.ok) {
+                    res.statusCode = anthropicResp.status
+                    res.setHeader('Content-Type', 'application/json')
+                    res.end(JSON.stringify({ error: json?.error?.message || 'Anthropic request failed' }))
+                    return
+                  }
+
+                  const content = Array.isArray(json?.content) ? json.content : []
+                  turnMessages.push({ role: 'assistant', content })
+                  const textBlocks = content.filter(block => block?.type === 'text')
+                  finalText = textBlocks.map(block => block?.text || '').join('\n').trim()
+                  const toolUseBlocks = content.filter(block => block?.type === 'tool_use')
+                  if (!toolUseBlocks.length) break
+
+                  const toolResults = []
+                  for (const block of toolUseBlocks) {
+                    const toolName = String(block?.name || '')
+                    const toolInput = block?.input && typeof block.input === 'object' ? block.input : {}
+                    let toolOutput = {}
+                    let isError = false
+                    try {
+                      toolOutput = await executeTool(toolName, toolInput)
+                    } catch (toolErr) {
+                      isError = true
+                      toolOutput = { error: toolErr?.message || 'Tool execution failed' }
+                    }
+                    toolCalls.push({
+                      name: toolName,
+                      input: toolInput,
+                    })
+                    toolResults.push({
+                      type: 'tool_result',
+                      tool_use_id: block.id,
+                      content: JSON.stringify(toolOutput),
+                      is_error: isError,
+                    })
+                  }
+                  turnMessages.push({ role: 'user', content: toolResults })
                 }
 
-                const textBlocks = Array.isArray(json?.content) ? json.content.filter(b => b?.type === 'text') : []
-                const text = textBlocks.map(b => b.text || '').join('\n').trim()
                 res.statusCode = 200
                 res.setHeader('Content-Type', 'application/json')
-                res.end(JSON.stringify({ message: text }))
+                res.end(JSON.stringify({ message: finalText || '(empty response)', tool_calls: toolCalls }))
               } catch (err) {
                 res.statusCode = 500
                 res.setHeader('Content-Type', 'application/json')
@@ -1360,15 +2135,116 @@ export default defineConfig(({ mode }) => {
               sendJson(res, 405, { error: 'Method not allowed' })
               return
             }
-            if (syncState.running) {
+            if (syncState.running || birthdaysState.running) {
               sendJson(res, 409, { error: 'Another sync job is already in progress' })
               return
             }
-            runSyncJob({
-              full: false,
-              steps: [{ script: 'scripts/extract_birthdays.py', label: 'Generating birthdays' }],
-            })
-            sendJson(res, 202, await getSyncStatePayload())
+
+            birthdaysState.running = true
+            birthdaysState.status = 'running'
+            birthdaysState.scope = 'dm'
+            birthdaysState.phase = 'scan'
+            birthdaysState.chats_done = 0
+            birthdaysState.chats_total = 0
+            birthdaysState.refs_found = 0
+            birthdaysState.chats_left = 0
+            birthdaysState.refs_done = 0
+            birthdaysState.refs_total = 0
+            birthdaysState.rows_ready = 0
+            birthdaysState.started_at = new Date().toISOString()
+            birthdaysState.finished_at = null
+            birthdaysState.error = null
+            birthdaysState.logs = ''
+
+            ;(async () => {
+              try {
+                appendBirthdayLog(`\n$ scripts/extract_birthdays.py --scope dm\n`)
+                const resultDm = await runPythonStep('scripts/extract_birthdays.py', ['--scope', 'dm'], chunk => {
+                  appendBirthdayLog(chunk)
+                  applyBirthdayProgressChunk(chunk)
+                })
+                if (resultDm.logs && !birthdaysState.logs.includes(resultDm.logs)) appendBirthdayLog(`${resultDm.logs}\n`)
+
+                birthdaysState.scope = 'group'
+                birthdaysState.phase = 'scan'
+                birthdaysState.chats_done = 0
+                birthdaysState.chats_total = 0
+                birthdaysState.refs_found = 0
+                birthdaysState.chats_left = 0
+                birthdaysState.refs_done = 0
+                birthdaysState.refs_total = 0
+                birthdaysState.rows_ready = 0
+                appendBirthdayLog(`\n$ scripts/extract_birthdays.py --scope group\n`)
+                const resultGroup = await runPythonStep('scripts/extract_birthdays.py', ['--scope', 'group'], chunk => {
+                  appendBirthdayLog(chunk)
+                  applyBirthdayProgressChunk(chunk)
+                })
+                if (resultGroup.logs && !birthdaysState.logs.includes(resultGroup.logs)) {
+                  appendBirthdayLog(`${resultGroup.logs}\n`)
+                }
+                birthdaysState.status = 'complete'
+                birthdaysState.scope = 'dm'
+              } catch (err) {
+                birthdaysState.status = 'error'
+                birthdaysState.error = err?.message || 'Birthday generation failed'
+                appendBirthdayLog(`\n${birthdaysState.error}\n`)
+              } finally {
+                birthdaysState.running = false
+                birthdaysState.finished_at = new Date().toISOString()
+                birthdaysState.scope = 'dm'
+              }
+            })()
+
+            sendJson(res, 202, birthdaysState)
+          })
+
+          server.middlewares.use('/api/sync-birthdays-groups', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            if (syncState.running || birthdaysState.running) {
+              sendJson(res, 409, { error: 'Another sync job is already in progress' })
+              return
+            }
+
+            birthdaysState.running = true
+            birthdaysState.status = 'running'
+            birthdaysState.scope = 'group'
+            birthdaysState.phase = 'scan'
+            birthdaysState.chats_done = 0
+            birthdaysState.chats_total = 0
+            birthdaysState.refs_found = 0
+            birthdaysState.chats_left = 0
+            birthdaysState.refs_done = 0
+            birthdaysState.refs_total = 0
+            birthdaysState.rows_ready = 0
+            birthdaysState.started_at = new Date().toISOString()
+            birthdaysState.finished_at = null
+            birthdaysState.error = null
+            birthdaysState.logs = ''
+
+            ;(async () => {
+              try {
+                appendBirthdayLog(`\n$ scripts/extract_birthdays.py --scope group\n`)
+                const result = await runPythonStep('scripts/extract_birthdays.py', ['--scope', 'group'], chunk => {
+                  appendBirthdayLog(chunk)
+                  applyBirthdayProgressChunk(chunk)
+                })
+                birthdaysState.status = 'complete'
+                if (result.logs && !birthdaysState.logs.includes(result.logs)) appendBirthdayLog(`${result.logs}\n`)
+              } catch (err) {
+                birthdaysState.status = 'error'
+                birthdaysState.error = err?.message || 'Group birthday generation failed'
+                appendBirthdayLog(`\n${birthdaysState.error}\n`)
+              } finally {
+                birthdaysState.running = false
+                birthdaysState.finished_at = new Date().toISOString()
+                birthdaysState.scope = 'dm'
+              }
+            })()
+
+            sendJson(res, 202, birthdaysState)
           })
 
           server.middlewares.use('/api/birthdays', async (req, res, next) => {
@@ -1385,6 +2261,173 @@ export default defineConfig(({ mode }) => {
               sendJson(res, 200, payload)
             } catch (err) {
               sendJson(res, 500, { error: err?.message || 'Failed to load birthdays' })
+            }
+          })
+
+          server.middlewares.use('/api/birthdays/update', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const body = await readRequestJson(req)
+              const chatPersonJid = String(body?.chat_person_jid || '').trim()
+              const referencePk = body?.reference_pk
+              const birthdayPersonName = String(body?.birthday_person_name || '').trim() || 'Unknown'
+              const date = String(body?.date || '').trim()
+              if (!chatPersonJid || referencePk == null) {
+                sendJson(res, 400, { error: 'Expected chat_person_jid and reference_pk' })
+                return
+              }
+              if (!/^\d{2}-[A-Za-z]{3}$/.test(date)) {
+                sendJson(res, 400, { error: 'Expected date in DD-MMM format (e.g. 08-May)' })
+                return
+              }
+              const normalizedDate = `${date.slice(0, 2)}-${date.slice(3, 4).toUpperCase()}${date.slice(4).toLowerCase()}`
+
+              const payload = await readJson(birthdaysDataPath, { generated_at: null, items: [] })
+              const items = Array.isArray(payload?.items) ? payload.items : []
+              const idx = items.findIndex(item =>
+                String(item?.chat_person_jid || '').trim() === chatPersonJid
+                && String(item?.reference_pk ?? '') === String(referencePk),
+              )
+              if (idx < 0) {
+                sendJson(res, 404, { error: 'Birthday row not found' })
+                return
+              }
+
+              const updated = {
+                ...items[idx],
+                birthday_person_name: birthdayPersonName,
+                date: normalizedDate,
+                confidence: birthdayPersonName.toLowerCase() === 'unknown'
+                  ? 0
+                  : Math.max(Number(items[idx]?.confidence || 0), 0.99),
+                edited_manually: true,
+                edited_at: new Date().toISOString(),
+              }
+              items[idx] = updated
+              const nextPayload = {
+                ...payload,
+                generated_at: new Date().toISOString(),
+                items,
+              }
+              await writeFile(birthdaysDataPath, JSON.stringify(nextPayload, null, 2), 'utf8')
+              sendJson(res, 200, { ok: true, item: updated })
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to update birthday row' })
+            }
+          })
+
+          server.middlewares.use('/api/birthdays/reminder', async (req, res) => {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const body = await readRequestJson(req)
+              const birthdayPersonName = String(body?.birthday_person_name || '').trim()
+              const rawDate = String(body?.date || '').trim()
+              if (!birthdayPersonName || birthdayPersonName.toLowerCase() === 'unknown') {
+                sendJson(res, 400, { error: 'Expected a resolved birthday person name' })
+                return
+              }
+              const match = rawDate.match(/^(\d{2})-([A-Za-z]{3})$/)
+              if (!match) {
+                sendJson(res, 400, { error: 'Expected date in DD-MMM format (e.g. 08-May)' })
+                return
+              }
+
+              const composioStatus = await getComposioStatusPayload()
+              if (!composioStatus?.has_api_key || String(composioStatus?.connection_status || '').toUpperCase() !== 'ACTIVE') {
+                sendJson(res, 400, { error: 'complete calendar setup' })
+                return
+              }
+
+              const monthName = `${match[2][0].toUpperCase()}${match[2].slice(1).toLowerCase()}`
+              const monthIndex = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].indexOf(monthName)
+              const day = Number(match[1])
+              if (monthIndex < 0 || day < 1 || day > 31) {
+                sendJson(res, 400, { error: 'Expected date in DD-MMM format (e.g. 08-May)' })
+                return
+              }
+
+              const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
+              const nowMs = Date.now()
+              const nowIst = new Date(nowMs + IST_OFFSET_MS)
+              const thisYear = nowIst.getUTCFullYear()
+              const candidateMs = year => (
+                Date.UTC(year, monthIndex, day, 22, 0, 0) - IST_OFFSET_MS - (24 * 60 * 60 * 1000)
+              )
+              let startMs = candidateMs(thisYear)
+              if (startMs <= nowMs) startMs = candidateMs(thisYear + 1)
+              const endMs = startMs + (30 * 60 * 1000)
+              const fmtIst = ms => {
+                const d = new Date(ms + IST_OFFSET_MS)
+                const y = d.getUTCFullYear()
+                const m = String(d.getUTCMonth() + 1).padStart(2, '0')
+                const dd = String(d.getUTCDate()).padStart(2, '0')
+                const hh = String(d.getUTCHours()).padStart(2, '0')
+                const mm = String(d.getUTCMinutes()).padStart(2, '0')
+                return `${y}-${m}-${dd}T${hh}:${mm}:00+05:30`
+              }
+
+              const { apiKey, userId, connectionId } = await getComposioConfig(rootDir, env)
+              if (!apiKey || !userId || !connectionId) {
+                sendJson(res, 400, { error: 'complete calendar setup' })
+                return
+              }
+
+              try {
+                const composio = await getComposioClient(apiKey)
+                const result = await composio.tools.execute('GOOGLECALENDAR_CREATE_EVENT', {
+                  userId,
+                  connectedAccountId: connectionId,
+                  arguments: {
+                    calendar_id: 'primary',
+                    summary: `${birthdayPersonName}'s birthday`,
+                    start_datetime: fmtIst(startMs),
+                    end_datetime: fmtIst(endMs),
+                    timezone: 'Asia/Kolkata',
+                    recurrence: ['RRULE:FREQ=YEARLY'],
+                  },
+                  dangerouslySkipVersionCheck: true,
+                })
+                if (result?.successful === false || result?.error) {
+                  sendJson(res, 400, { error: 'complete calendar setup' })
+                  return
+                }
+                sendJson(res, 200, { ok: true, message: 'reminder_set' })
+              } catch {
+                sendJson(res, 400, { error: 'complete calendar setup' })
+              }
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to create reminder' })
+            }
+          })
+
+          server.middlewares.use('/api/birthdays/status', async (req, res) => {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            sendJson(res, 200, birthdaysState)
+          })
+
+          server.middlewares.use('/api/birthdays/groups', async (req, res, next) => {
+            if (req.url && req.url !== '/' && req.url !== '') {
+              next()
+              return
+            }
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'Method not allowed' })
+              return
+            }
+            try {
+              const payload = await readJson(groupBirthdaysDataPath, { generated_at: null, items: [] })
+              sendJson(res, 200, payload)
+            } catch (err) {
+              sendJson(res, 500, { error: err?.message || 'Failed to load group birthdays' })
             }
           })
         },

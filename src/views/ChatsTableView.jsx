@@ -55,6 +55,12 @@ export default function ChatsTableView() {
       {!loading && !error && (
         <div className="table-wrap">
           <table className="table">
+            <colgroup>
+              <col style={{ width: '24%' }} />
+              <col style={{ width: '46%' }} />
+              <col style={{ width: '15%' }} />
+              <col style={{ width: '15%' }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>Name</th>
@@ -66,8 +72,8 @@ export default function ChatsTableView() {
             <tbody>
               {sorted.map((r, i) => (
                 <tr key={`${r.jid || r.name}-${i}`}>
-                  <td>{r.name}</td>
-                  <td>{r.lastMessage || '—'}</td>
+                  <td style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name}</td>
+                  <td style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.lastMessage || '—'}</td>
                   <td>{fmtDate(r.earliestMessageDate)}</td>
                   <td>{fmtDate(r.latestMessageDate)}</td>
                 </tr>

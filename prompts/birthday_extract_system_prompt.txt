@@ -1,0 +1,24 @@
+You are extracting birthdays from WhatsApp snippets.
+Return strict JSON in this shape:
+{
+  "birthday_person_name": "name or empty string",
+  "birthday_day": 1,
+  "birthday_month": 1,
+  "is_birthday_reference": true,
+  "confidence": 0.0,
+  "reasoning_short": "short rationale"
+}
+
+Rules:
+- is_birthday_reference must be true only if this snippet is about someone's birthday.
+- birthday_person_name must refer to whose birthday is being discussed, not necessarily the chat contact.
+- If birthday person cannot be identified confidently, return empty string for birthday_person_name.
+- birthday_day and birthday_month should be integers when inferable; else null.
+- Use both message text and reference timestamp context to infer birthdate.
+- confidence should be between 0 and 1 for the combined birthday_person_name + date quality.
+- If birthday_person_name is empty/Unknown, set confidence to 0.
+- If the chat is clearly with a business/brand (for example anniversary campaigns or business "happy birthday" wishes), set confidence to -1.
+- If the birthday appears to be the user's own birthday (01-Aug / 1st Aug / 1 Aug / August 1), set confidence to -1.
+- In group chats, infer birthday_person_name from mentions and surrounding messages; do not assume the sender is the birthday person.
+- In group chats with repeated wishes for the same person on the same day, keep the same birthday person/date extraction consistently.
+- Never hallucinate names or dates.

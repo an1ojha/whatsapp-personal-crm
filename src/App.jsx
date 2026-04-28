@@ -23,7 +23,7 @@ export default function App() {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: 'Ask me anything. I am connected to Anthropic via your local /api/chat endpoint.' },
+    { role: 'assistant', content: 'Ask me about your people, chats, or follow-ups.' },
   ])
 
   const canSend = input.trim().length > 0 && !sending
@@ -44,7 +44,11 @@ export default function App() {
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`)
-      setMessages(prev => [...prev, { role: 'assistant', content: data?.message || '(empty response)' }])
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: data?.message || '(empty response)',
+        tool_calls: Array.isArray(data?.tool_calls) ? data.tool_calls : [],
+      }])
     } catch (err) {
       setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err?.message || 'Request failed'}` }])
     } finally {
@@ -60,6 +64,11 @@ export default function App() {
           {messages.map((m, i) => (
             <div key={i} className={m.role === 'assistant' ? 'msg-assistant' : 'msg-user'}>
               {m.content}
+              {m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  {`· ${m.tool_calls.map(call => call?.name).filter(Boolean).join(' · ')}`}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -106,9 +115,15 @@ export default function App() {
             <form className="chatbar" onSubmit={onSend}>
               <textarea
                 className="input-base"
-                placeholder="Message assistant..."
+                placeholder="e.g. Show me the X links I sent Kushal in the last 30 days"
                 value={input}
                 onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    onSend()
+                  }
+                }}
               />
               <button type="submit" className="primary-btn" disabled={!canSend}>
                 {sending ? 'Sending...' : 'Send'}

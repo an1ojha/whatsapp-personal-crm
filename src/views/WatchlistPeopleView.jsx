@@ -129,6 +129,7 @@ export default function WatchlistPeopleView() {
     setProfileDraft({
       name: row?.name || '',
       category: row?.category || 'personal',
+      birthday: row?.birthday || '',
       on_watchlist: Boolean(row?.on_watchlist),
       context: {
         relation: row?.context?.relation || row?.relation || '',
@@ -153,6 +154,7 @@ export default function WatchlistPeopleView() {
           patch: {
             name: profileDraft.name,
             category: profileDraft.category,
+            birthday: profileDraft.birthday || '',
             on_watchlist: Boolean(profileDraft.on_watchlist),
             context: {
               relation: profileDraft.context.relation,
@@ -287,6 +289,15 @@ export default function WatchlistPeopleView() {
                 <option value="logistics">logistics</option>
               </select>
             </label>
+            <label>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Birthday</div>
+              <input
+                value={profileDraft.birthday || ''}
+                onChange={e => setProfileDraft(prev => ({ ...prev, birthday: e.target.value }))}
+                placeholder="DD-MMM"
+                style={fieldStyle()}
+              />
+            </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <input
                 type="checkbox"
@@ -392,7 +403,7 @@ export default function WatchlistPeopleView() {
     <div>
       <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>People</h2>
       <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 14 }}>
-        Sorted by messages in the last 30 days, then watchlist.
+        Sorted by messages in the last 30 days, then watchlist. Birthday is auto-filled from extraction and can be edited in profile.
       </p>
       {loading && <p style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading contacts…</p>}
       {error && <p style={{ color: 'var(--accent-danger)', fontSize: 13 }}>{error}</p>}
@@ -404,6 +415,7 @@ export default function WatchlistPeopleView() {
               <tr>
                 <th>Name</th>
                 <th>Relation</th>
+                <th>Birthday</th>
                 <th style={{ textAlign: 'right' }}>Messages (30d)</th>
                 <th style={{ textAlign: 'center' }}>Watchlist</th>
                 <th style={{ textAlign: 'right' }}>Followups</th>
@@ -444,6 +456,7 @@ export default function WatchlistPeopleView() {
                     </div>
                   </td>
                   <td>{row.context?.relation || row.relation || '—'}</td>
+                  <td style={{ fontVariantNumeric: 'tabular-nums' }}>{row.birthday || '—'}</td>
                   <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
                     {row.recent_messages_30d || 0}
                   </td>
@@ -470,7 +483,7 @@ export default function WatchlistPeopleView() {
               ))}
               {!sorted.length && (
                 <tr>
-                  <td colSpan={5} style={{ color: 'var(--text-secondary)' }}>
+                  <td colSpan={6} style={{ color: 'var(--text-secondary)' }}>
                     Contacts are empty. Run `npm run sync`.
                   </td>
                 </tr>
